@@ -1,0 +1,153 @@
+import RPi.GPIO as GPIO
+import subprocess
+import time
+from picamera2 import Picamera2
+import os
+import paramiko
+from scp import SCPClient
+from picamera2 import Picamera2, Preview
+from picamera2.encoders import JpegEncoder
+from picamera2.outputs import FileOutput
+
+REMOTE_PATH = "C:/Users/Hi/Desktop/captured.jpg"
+SAVE_PATH = "/home/ehdrjs1638/captured.jpg"
+REMOTE_HOST = "192.168.137.1"
+REMOTE_USER = "hi"
+REMOTE_PASS = "hwang710522@"
+already_captured = False
+capture_time = 0
+
+picam = Picamera2()
+
+capture_config = picam.create_still_configuration(
+    main={"size": (736, 317)},
+    lores={"size": (320, 240)},
+    display="lores"
+)
+picam.configure(capture_config)
+picam.start()
+
+picam.set_controls({
+    "AfMode": 1,        # Continuous autofocus
+    "AwbEnable": True,  # Auto white balance
+    "AeEnable": True    # Auto exposure
+})
+picam.switch_mode_and_capture_file("still", SAVE_PATH)
+# Sensor pins
+LEFT_SENSOR = 23
+RIGHT_SENSOR = 25
+TRIG = 17
+ECHO = 27
+
+# Motor pins
+ENA = 26
+IN1 = 19
+IN2 = 13
+
+ENB = 0
+IN3 = 6
+IN4 = 5
+
+FORWARD = 1
+BACKWARD = 2
+STOP = 0
+def setup_motor(EN, IN1, IN2):
+    GPIO.setup(EN, GPIO.OUT)
+    GPIO.setup(IN1, GPIO.OUT)
+    GPIO.setup(IN2, GPIO.OUT)
+    pwm = GPIO.PWM(EN, 300)
+    pwm.start(0)
+    return pwm
+
+def drive_motor(pwm, IN1, IN2, speed, direction):
+    pwm.ChangeDutyCycle(speed)
+    if direction == FORWARD:
+        GPIO.output(IN1, GPIO.HIGH)
+        GPIO.output(IN2, GPIO.LOW)
+    elif direction == BACKWARD:
+        GPIO.output(IN1, GPIO.LOW)
+        GPIO.output(IN2, GPIO.HIGH)
+    elif direction == STOP:
+        GPIO.output(IN1, GPIO.LOW)
+        GPIO.output(IN2, GPIO.LOW)
+
+def move_forward():
+    drive_motor(pwmA, IN1, IN2, 45, FORWARD)
+    drive_motor(pwmB, IN3, IN4, 45, FORWARD)
+
+def turn_left():
+    drive_motor(pwmA, IN1, IN2, 90, BACKWARD)
+    drive_motor(pwmB, IN3, IN4, 100, FORWARD)
+
+def turn_right():
+    drive_motor(pwmA, IN1, IN2, 100, FORWARD)
+    drive_motor(pwmB, IN3, IN4, 90, BACKWARD)
+
+def stop():
+    drive_motor(pwmA, IN1, IN2, 0, STOP)
+    drive_motor(pwmB, IN3, IN4, 0, STOP)
+def get_distance():
+    GPIO.output(TRIG, False)
+    time.sleep(0.05)
+
+    GPIO.output(TRIG, True)
+    time.sleep(0.00001)
+    GPIO.output(TRIG, False)
+
+    timeout_start = time.time() + 0.05
+    while GPIO.input(ECHO) == 0:
+        disstart = time.time()
+        if time.time() > timeout_start:
+            return -1  # timeout waiting for echo start
+
+    timeout_stop = time.time() + 0.05
+    while GPIO.input(ECHO) == 1:
+        disstop = time.time()
+        if time.time() > timeout_stop:
+            return -1  # timeout waiting for echo end
+
+    disduration = disstop - disstart
+    distance = disduration * 34300 / 2
+    return round(distance, 2)
+
+GPIO.setwarnings(False)
+GPIO.setmode(GPIO.BCM)
+
+GPIO.setup(LEFT_SENSOR, GPIO.IN)
+GPIO.setup(RIGHT_SENSOR, GPIO.IN)
+GPIO.setup(TRIG, GPIO.OUT)
+GPIO.setup(ECHO, GPIO.IN)
+
+GPIO.output(TRIG, False)
+pwmA = setup_motor(ENA, IN1, IN2)
+pwmB = setup_motor(ENB, IN3, IN4)
+
+try:
+    while True:
+        left = GPIO.input(LEFT_SENSOR)
+        right = GPIO.input(RIGHT_SENSOR)
+        dis = get_distance()
+        if dis < 40 and not already_captured:
+            stop()
+            print("waiting image...")
+            time.sleep(3)
+            print("Capturing image...")
+            picam.capture_file(SAVE_PATH)
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(REMOTE_HOST, username=REMOTE_USER, password=REMOTE_PASS)
+
+            with SCPClient(ssh.get_transport()) as scp:
+                scp.put(SAVE_PATH, REMOTE_PATH)
+            already_captured = True
+            capture_time = time.time()
+            time.sleep(10)
+        if already_captured and (time.time() - capture_time > 14):
+            already_captured = False
+            continue
+        
+        if left == 0 and right == 0:
+            move_forward()
+            print("Moving forward")
+        elif left == 0 and right == 1:
+            turn_
