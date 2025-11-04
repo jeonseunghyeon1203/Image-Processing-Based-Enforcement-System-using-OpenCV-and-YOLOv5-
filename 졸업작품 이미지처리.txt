@@ -1,0 +1,120 @@
+from watchdog.observers import Observer
+from watchdog.events import FileSystemEventHandler
+import time
+import os
+import shutil
+import subprocess
+import easyocr
+from pathlib import Path
+import cv2
+
+WATCH_FOLDER = os.path.expanduser("~/Desktop")
+TARGET_FILENAME = "captured.jpg"
+SAVE_FOLDER = os.path.join(WATCH_FOLDER, "plate_results")
+os.makedirs(SAVE_FOLDER, exist_ok=True)
+
+YOLOV5_DIR = r"C:\Users\Hi\Downloads\yolov5"  # YOLOv5 경로
+WEIGHTS_PATH = r"runs/train/exp3/weights/best.pt"  # 훈련된 모델
+OUTPUT_PROJECT = "runs/detect"
+OUTPUT_NAME = "live_detect"
+
+class MyHandler(FileSystemEventHandler):
+    def __init__(self):
+        self.last_processed = 0
+        self.counter = 1
+
+    def on_modified(self, event):
+        if os.path.basename(event.src_path) == TARGET_FILENAME:
+            now = time.time()
+            if now - self.last_processed < 3:
+                return
+
+            # 파일 안정화 확인
+            prev_size = -1
+            while True:
+                if not os.path.exists(event.src_path):
+                    print("❌ 파일이 존재하지 않음")
+                    return
+                curr_size = os.path.getsize(event.src_path)
+                if curr_size == prev_size:
+                    break
+                prev_size = curr_size
+                time.sleep(0.5)
+
+            self.last_processed = now
+            print(f"\n📸 새 이미지 감지됨: {TARGET_FILENAME}")
+            self.process_image(event.src_path)
+
+    def process_image(self, filepath):
+        # YOLOv5 검출 실행
+        self.run_yolov5_detect(filepath)
+
+        # YOLOv5 결과 폴더에서 잘라낸 번호판 이미지 복사
+        crops_dir = Path(YOLOV5_DIR) / OUTPUT_PROJECT / OUTPUT_NAME / "crops"
+        if crops_dir.exists():
+            found_plate = False
+            for class_dir in crops_dir.iterdir():
+                if class_dir.is_dir():
+                    for img_file in class_dir.iterdir():
+                        filename = f"final_plate_{self.counter}.jpg"
+                        dst = Path(SAVE_FOLDER) / filename
+                        shutil.copy(img_file, dst)
+                        print(f"✅ 번호판 영역 저장: {filename}")
+                        self.run_ocr(str(dst))
+                        found_plate = True
+            if not found_plate:
+                print("❌ 번호판이 검출되지 않았습니다.")
+        else:
+            print("❌ YOLOv5 crops 디렉토리를 찾을 수 없습니다.")
+
+        # YOLO 결과 디렉토리 정리
+        shutil.rmtree(Path(YOLOV5_DIR) / OUTPUT_PROJECT / OUTPUT_NAME, ignore_errors=True)
+        self.counter += 1
+
+        # 원본 이미지 삭제
+        try:
+            os.remove(filepath)
+            print(f"🗑️ 원본 파일 삭제 완료")
+        except Exception as e:
+            print(f"❌ 원본 파일 삭제 실패: {e}")
+
+    def run_yolov5_detect(self, image_path):
+        os.chdir(YOLOV5_DIR)
+        command = [
+            "python", "detect.py",
+            "--weights", WEIGHTS_PATH,
+            "--source", image_path,
+            "--img", "640",
+            "--save-crop",
+            "--project", OUTPUT_PROJECT,
+            "--name", OUTPUT_NAME
+        ]
+        print("🚀 YOLOv5 번호판 검출 실행 중...")
+        subprocess.run(command, stdout=subprocess.DEVNULL)
+
+    def run_ocr(self, plate_path):
+        reader = easyocr.Reader(['ko'])
+        results = reader.readtext(plate_path)
+        results_sorted = sorted(results, key=lambda x: (x[0][0][0], x[0][0][1]))
+        full_text = ''.join([text for _, text, _ in results_sorted])
+
+        timestamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        log_line = f"[{timestamp}] 인식 결과: {full_text}\n"
+
+        txt_path = os.path.join(SAVE_FOLDER, "results.txt")
+        with open(txt_path, "a", encoding="utf-8") as f:
+            f.write(log_line)
+
+        print(f"🔠 {log_line.strip()}")
+
+if __name__ == "__main__":
+    print(f"📂 감시 중: '{TARGET_FILENAME}' in {WATCH_FOLDER}")
+    print("📌 Ctrl+C로 종료 가능")
+    event_handler = MyHandler()
+    observer = Observer()
+    observer.schedule(event_handler, path=WATCH_FOLDER, recursive=False)
+    observer.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardIn
